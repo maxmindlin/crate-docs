@@ -10,3 +10,4 @@ edition = "2018"
 scraper = "0.11.0"
 reqwest = { version = "0.10.4", features = ["blocking"] }
 prettytable-rs = "^0.8"
+url = "2.1.1"

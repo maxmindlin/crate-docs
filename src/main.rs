@@ -1,7 +1,6 @@
 mod content;
 
-use std::io;
-use std::io::*;
+use rustyline::Editor;
 use std::process::Command;
 
 use content::*;
@@ -27,8 +26,19 @@ impl From<DocPage> for DocState {
 
 impl DocState {
     fn search_doc_listings(&self, target: &str) -> Option<DocListing> {
+        // First search for exact matches
         for doc in &self.available_docs {
-            if &doc.name == target || doc.name.ends_with(target) {
+            if &doc.name == target {
+                return Some(doc.clone())
+            }
+        }
+
+        // No exact matches - search for anything
+        // that ends with target. If you
+        // do this first you could fail to
+        // return an exact match if it comes later.
+        for doc in &self.available_docs {
+            if doc.name.ends_with(target) {
                 return Some(doc.clone())
             }
         }
@@ -99,42 +109,53 @@ impl From<String> for Cmd {
     }
 }
 
-fn wait_for_cmd(prompt: &str) -> String {
-    print!("{} ", prompt);
-    io::stdout().flush().unwrap();
-
-    let mut cmd = String::new();
-
-    std::io::stdin().read_line(&mut cmd).unwrap();
-    cmd.trim().to_owned()
-}
-
-fn main() {
-    loop {
-        let cmd = wait_for_cmd(">>");
-        process_cmd(Cmd::from(cmd));
+fn wait_for_input<T: From<String>>(prompt: &str, editor: &mut Editor<()>) -> T {
+    match editor.readline(prompt) {
+        Ok(line) => {
+            editor.add_history_entry(line.as_str());
+            T::from(line)
+        }
+        Err(_) => std::process::exit(1)
     }
 }
 
-fn process_cmd(cmd: Cmd) {
+fn wait_for_cmd(prompt: &str, editor: &mut Editor<()>) -> Cmd {
+    let p = format!("{} ", prompt);
+    wait_for_input::<Cmd>(&p, editor)
+}
+
+fn wait_for_permission(prompt: &str, editor: &mut Editor<()>) -> Allow {
+    let p = format!("{} (y/n) ", prompt);
+    wait_for_input::<Allow>(&p, editor)
+}
+
+fn main() {
+    let mut e = Editor::<()>::new();
+    loop {
+        let cmd = wait_for_cmd(">>", &mut e);
+        process_cmd(cmd, &mut e);
+    }
+}
+
+fn process_cmd(cmd: Cmd, editor: &mut Editor<()>) {
     match cmd {
         Cmd::Empty => {},
         Cmd::Unknown(s) => println!("Unknown command `{}`", s),
-        Cmd::Lookup(name) => process_crate_fetch_cmds(false, &name),
+        Cmd::Lookup(name) => process_crate_fetch_cmds(false, &name, editor),
         Cmd::InvalidUsage(s) => println!("Invalid command usage: {}", s),
-        Cmd::RefreshCache => process_refresh_cmd(),
+        Cmd::RefreshCache => process_refresh_cmd(editor),
         _ => println!("Must lookup a crate before that cmd can be used")
     }
 }
 
-fn process_crate_fetch_cmds(online: bool, name: &str) {
+fn process_crate_fetch_cmds(online: bool, name: &str, editor: &mut Editor<()>) {
     loop {
         let page = DocPage::fetch(online, &name);
         match page {
             Err(ContentError::DoesNotExist) if !online => {
-                let confirm = wait_for_cmd("Docs are missing - fetch live page? >>");
+                let confirm = wait_for_permission("Docs are missing - fetch live page? >>", editor);
                 match Allow::from(confirm) {
-                    Allow::Yes => process_crate_fetch_cmds(true, name),
+                    Allow::Yes => process_crate_fetch_cmds(true, name, editor),
                     Allow::No => break
                 }
             }
@@ -148,12 +169,12 @@ fn process_crate_fetch_cmds(online: bool, name: &str) {
                 break;
             },
             Err(e) => println!("{:?}", e),
-            Ok(p) => process_opened_crate_cmds(p, &name),
+            Ok(p) => process_opened_crate_cmds(p, &name, editor),
         }
     }
 }
 
-fn process_opened_crate_cmds(p: DocPage, name: &str) {
+fn process_opened_crate_cmds(p: DocPage, name: &str, editor: &mut Editor<()>) {
     // Here we have a valid doc page open.
     // Enter a new state where we are looping
     // cmds onto this doc page.
@@ -161,11 +182,11 @@ fn process_opened_crate_cmds(p: DocPage, name: &str) {
     state.page.print_tableview();
     loop {
         let cmd_prmpt = format!("( {} ) >>", &name);
-        let cmd = Cmd::from(wait_for_cmd(&cmd_prmpt));
+        let cmd = Cmd::from(wait_for_cmd(&cmd_prmpt, editor));
         match cmd {
-            Cmd::Lookup(_) => process_cmd(cmd),
+            Cmd::Lookup(_) => process_cmd(cmd, editor),
             Cmd::Empty => continue,
-            Cmd::RefreshCache => process_refresh_cmd(),
+            Cmd::RefreshCache => process_refresh_cmd(editor),
             Cmd::Doc(s) => {
                 match state.search_doc_listings(&s) {
                     None => println!("Did not match any docs"),
@@ -177,8 +198,8 @@ fn process_opened_crate_cmds(p: DocPage, name: &str) {
     }
 }
 
-fn process_refresh_cmd() {
-    let confirm = wait_for_cmd("Refresh the doc cache? >>");
+fn process_refresh_cmd(editor: &mut Editor<()>) {
+    let confirm = wait_for_permission("Refresh the doc cache? >>", editor);
     match Allow::from(confirm) {
         Allow::Yes => {
             Command::new("cargo").arg("doc").spawn().expect("Failed to refresh docs");
